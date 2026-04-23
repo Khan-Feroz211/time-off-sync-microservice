@@ -199,3 +199,304 @@ This exercise evaluates the design and implementation of a Time-Off Microservice
 Do not only paste requirements into AI and submit directly. Review the generated output carefully and improve the solution quality.
 
 Please ensure submission completeness before upload. Late submissions may not be considered.
+
+---
+
+## Request Lifecycle
+
+This service follows a defensive request lifecycle to protect balance integrity:
+
+1. Validate request payload and required dimensions (`employeeId`, `locationId`, `leaveType`, `units`, `startDate`, `endDate`).
+2. Read local cached balance snapshot for fast feedback.
+3. Call HCM realtime validation endpoint before final acceptance.
+4. If valid, create a time-off request in `PENDING_MANAGER_APPROVAL` (or `APPROVED` for auto-approval mode).
+5. On approval, perform a second realtime balance check to avoid stale approvals.
+6. Submit approved deduction intent to HCM.
+7. Persist final request status and update local balance projection.
+8. Record sync event outcome for auditability.
+
+Suggested status transitions:
+
+- `DRAFT` -> `SUBMITTED`
+- `SUBMITTED` -> `PENDING_MANAGER_APPROVAL`
+- `PENDING_MANAGER_APPROVAL` -> `APPROVED` or `REJECTED`
+- `APPROVED` -> `SYNCED` or `SYNC_FAILED`
+- `SYNC_FAILED` -> `RETRYING` -> `SYNCED` or `MANUAL_REVIEW`
+
+---
+
+## Data Model
+
+Balances are tracked per employee per location, with dimension-aware reconciliation.
+
+### Core Entities
+
+1. `employees`
+2. `locations`
+3. `leave_balances`
+4. `time_off_requests`
+5. `sync_events`
+6. `reconciliation_runs`
+
+### Suggested Table Shapes
+
+1. `employees`
+- `id` (PK)
+- `external_hcm_employee_id` (unique)
+- `first_name`
+- `last_name`
+- `status`
+- `created_at`, `updated_at`
+
+2. `locations`
+- `id` (PK)
+- `external_hcm_location_id` (unique)
+- `name`
+- `country_code`
+- `created_at`, `updated_at`
+
+3. `leave_balances`
+- `id` (PK)
+- `employee_id` (FK)
+- `location_id` (FK)
+- `leave_type`
+- `available_units`
+- `pending_units`
+- `last_hcm_snapshot_at`
+- `version`
+- unique composite index: (`employee_id`, `location_id`, `leave_type`)
+
+4. `time_off_requests`
+- `id` (PK)
+- `employee_id` (FK)
+- `location_id` (FK)
+- `leave_type`
+- `units`
+- `start_date`, `end_date`
+- `status`
+- `manager_id` (nullable)
+- `hcm_reference` (nullable)
+- `failure_reason` (nullable)
+- `created_at`, `updated_at`
+
+5. `sync_events`
+- `id` (PK)
+- `request_id` (nullable FK)
+- `direction` (`OUTBOUND` or `INBOUND`)
+- `event_type` (`REALTIME_VALIDATE`, `REALTIME_APPLY`, `BATCH_IMPORT`, `RECONCILIATION`)
+- `status` (`SUCCESS`, `FAILED`, `RETRYING`)
+- `payload_hash`
+- `error_code`, `error_message` (nullable)
+- `attempt`
+- `created_at`
+
+6. `reconciliation_runs`
+- `id` (PK)
+- `started_at`, `completed_at`
+- `status`
+- `records_scanned`
+- `drift_count`
+- `action_summary`
+
+---
+
+## API Overview
+
+REST-first design with explicit balance and request flows.
+
+### Balance Endpoints
+
+- `GET /balances/:employeeId?locationId=&leaveType=`
+- `POST /balances/sync/realtime`
+- `POST /balances/sync/batch`
+- `POST /balances/reconcile`
+
+### Time-Off Request Endpoints
+
+- `POST /time-off-requests`
+- `GET /time-off-requests/:id`
+- `GET /time-off-requests?employeeId=&status=`
+- `POST /time-off-requests/:id/approve`
+- `POST /time-off-requests/:id/reject`
+- `POST /time-off-requests/:id/retry-sync`
+
+### Internal and Operational Endpoints
+
+- `GET /health`
+- `GET /metrics`
+- `GET /sync-events?requestId=&status=`
+
+### Error Contract
+
+Use stable structured errors:
+
+- `VALIDATION_ERROR`
+- `INSUFFICIENT_BALANCE`
+- `INVALID_DIMENSION_COMBINATION`
+- `HCM_UNAVAILABLE`
+- `SYNC_CONFLICT`
+- `IDEMPOTENCY_VIOLATION`
+
+---
+
+## Mock HCM Design
+
+Mock endpoints are required to validate realtime and batch behavior during tests.
+
+### Mock HCM Realtime APIs
+
+- `GET /mock-hcm/balances/:employeeId?locationId=&leaveType=`
+- `POST /mock-hcm/time-off/validate`
+- `POST /mock-hcm/time-off/apply`
+
+### Mock HCM Batch API
+
+- `POST /mock-hcm/balances/batch-export`
+
+### Simulated Scenarios
+
+- Anniversary bonus that increases available units.
+- Start-of-year reset or carry-over.
+- Invalid employee-location-leaveType combination.
+- Transient HCM failures with retryable and non-retryable errors.
+
+---
+
+## Reconciliation Strategy
+
+Use hybrid synchronization:
+
+1. Realtime check on request create and approval.
+2. Scheduled batch import to refresh local snapshots.
+3. Drift detection comparing local projections to HCM snapshots.
+4. Auto-correction for safe drift classes.
+5. Manual review queue for unresolved or conflicting drift.
+
+Recommended reconciliation cadence:
+
+- Frequent lightweight runs (for example every 15 minutes) for high-change populations.
+- Full daily reconciliation for complete corpus consistency.
+
+---
+
+## Project Structure
+
+Suggested service structure:
+
+1. `src/modules/balances`
+2. `src/modules/time-off-requests`
+3. `src/modules/hcm-integration`
+4. `src/modules/reconciliation`
+5. `src/modules/mock-hcm`
+6. `src/modules/common`
+7. `test/unit`
+8. `test/integration`
+9. `test/e2e`
+
+---
+
+## Testing Strategy
+
+Testing is a primary evaluation criterion and should include layered coverage.
+
+### Unit Tests
+
+- Domain validation rules.
+- Status transition guards.
+- Idempotency key handling.
+- Retry policy branching.
+
+### Integration Tests
+
+- DB persistence and transaction boundaries.
+- Service-to-mock-HCM interactions.
+- Reconciliation and sync event storage.
+
+### End-to-End Tests
+
+- Request submission through approval to HCM sync.
+- Insufficient balance rejection with defensive fallback checks.
+- Batch import drift correction.
+- Retry flow from `SYNC_FAILED` to `SYNCED`.
+
+### Non-Functional Tests
+
+- Concurrency tests for duplicate submissions.
+- Failure injection for HCM timeouts and 5xx responses.
+- Regression tests for balance drift edge cases.
+
+### Coverage Targets
+
+- Statements: at least 85%
+- Branches: at least 80%
+- Critical flows (create, approve, sync, reconcile): at least 95%
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 20+
+- npm 10+
+- SQLite
+
+### Setup
+
+1. Clone repository.
+2. Install dependencies.
+3. Configure environment variables.
+4. Run DB migrations and seed data.
+5. Start API server.
+
+### Typical Commands
+
+- `npm install`
+- `npm run build`
+- `npm run start:dev`
+- `npm run test`
+- `npm run test:e2e`
+- `npm run test:coverage`
+
+### Packaging for Submission
+
+1. Ensure `node_modules` is excluded.
+2. Include source, tests, and README.
+3. Create a single `.zip` under 50 MB.
+
+---
+
+## Tradeoffs and Assumptions
+
+### Assumptions
+
+- HCM remains the final authority for balance acceptance.
+- Balances are dimensioned per employee and location.
+- Realtime APIs are available but can fail transiently.
+
+### Key Tradeoffs
+
+- Realtime validation improves correctness but increases latency.
+- Local caching improves UX but introduces drift risk.
+- Aggressive retries improve eventual success but can increase write pressure.
+
+---
+
+## Assessment Alignment
+
+This README is structured to align with the expected deliverables:
+
+1. TRD-quality requirements and architecture rationale.
+2. Explicit sync and reconciliation strategy for HCM source-of-truth constraints.
+3. Test plan and coverage expectations focused on regression resistance.
+4. Submission and packaging constraints captured clearly.
+
+---
+
+## Future Improvements
+
+1. Role-based access control and audit-policy hardening.
+2. Outbox pattern and message queue for resilient asynchronous sync.
+3. Policy engine for country-specific accrual and carry-over rules.
+4. Multi-tenant partitioning for enterprise scale.
+5. Observability expansion (traces, SLOs, alerting dashboards).
