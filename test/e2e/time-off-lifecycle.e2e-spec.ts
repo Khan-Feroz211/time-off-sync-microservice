@@ -41,8 +41,8 @@ describe('TimeOff Lifecycle (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await requestRepo.clear();
     await syncEventRepo.clear();
+    await requestRepo.clear();
     await leaveBalanceRepo.clear();
     await employeeRepo.clear();
     await locationRepo.clear();

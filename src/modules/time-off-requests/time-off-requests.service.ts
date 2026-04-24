@@ -145,6 +145,10 @@ export class TimeOffRequestsService {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Request not found' });
     }
 
+    if (!request.employee || !request.location) {
+      throw new BadRequestException({ code: ErrorCode.INVALID_DIMENSION_COMBINATION, message: 'Request employee or location not found' });
+    }
+
     this.assertTransition(request.status, RequestStatus.APPROVED);
 
     const empId = request.employee.externalHcmEmployeeId;
@@ -189,16 +193,23 @@ export class TimeOffRequestsService {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Request not found' });
     }
 
-    this.assertTransition(request.status, RequestStatus.REJECTED);
-
-    if (request.status === RequestStatus.PENDING_MANAGER_APPROVAL) {
-      const empId = request.employee.externalHcmEmployeeId;
-      const locId = request.location.externalHcmLocationId;
-      await this.balancesService.adjustPendingUnits(empId, locId, request.leaveType, -Number(request.units));
+    if (!request.employee || !request.location) {
+      throw new BadRequestException({ code: ErrorCode.INVALID_DIMENSION_COMBINATION, message: 'Request employee or location not found' });
     }
+
+    this.assertTransition(request.status, RequestStatus.REJECTED);
 
     request.status = RequestStatus.REJECTED;
     request.managerId = managerId || request.managerId;
+    await this.requestRepo.save(request);
+
+    await this.balancesService.adjustPendingUnits(
+      request.employee.externalHcmEmployeeId,
+      request.location.externalHcmLocationId,
+      request.leaveType,
+      -Number(request.units),
+    );
+
     const saved = await this.requestRepo.save(request);
     return this.mapToDto(saved, request.employee.externalHcmEmployeeId, request.location.externalHcmLocationId);
   }
