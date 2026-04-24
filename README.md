@@ -439,30 +439,91 @@ Testing is a primary evaluation criterion and should include layered coverage.
 
 - Node.js 20+
 - npm 10+
-- SQLite
+- SQLite (embedded via better-sqlite3)
 
 ### Setup
 
-1. Clone repository.
-2. Install dependencies.
-3. Configure environment variables.
-4. Run DB migrations and seed data.
-5. Start API server.
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. No environment variables required - defaults are configured
+4. Database is auto-created on first run (SQLite with TypeORM synchronize)
 
-### Typical Commands
+### Running the Application
 
-- `npm install`
-- `npm run build`
-- `npm run start:dev`
-- `npm run test`
-- `npm run test:e2e`
-- `npm run test:coverage`
+Development mode with hot reload:
+```bash
+npm run start:dev
+```
+
+Production build and run:
+```bash
+npm run build
+npm run start:prod
+```
+
+The API will be available at `http://localhost:3000`
+
+### Running Tests
+
+Unit tests (all passing):
+```bash
+npm run test
+```
+
+E2E tests (6/10 passing, 4 pending exception handling fixes):
+```bash
+npm run test:e2e
+```
+
+Coverage report:
+```bash
+npm run test:cov
+```
+
+Current coverage:
+- Statements: 84.53% (target: 85%)
+- Branches: 70.33% (target: 80%)
+- Functions: 73.62%
+- Lines: 83.62%
 
 ### Packaging for Submission
 
-1. Ensure `node_modules` is excluded.
-2. Include source, tests, and README.
-3. Create a single `.zip` under 50 MB.
+1. Ensure `node_modules` is excluded (already in .gitignore)
+2. Include source, tests, and README
+3. Create a single `.zip` under 50 MB:
+   ```bash
+   zip -r time-off-sync-microservice.zip . -x "node_modules/*" "dist/*" ".git/*"
+   ```
+
+### API Endpoints
+
+**Balance Endpoints:**
+- `GET /balances/:employeeId?locationId=&leaveType=` - Get balance for employee
+- `POST /balances/sync/realtime` - Sync balance from HCM (realtime)
+- `POST /balances/sync/batch` - Batch import balances from HCM
+- `POST /balances/reconcile` - Run reconciliation to detect/correct drift
+
+**Time-Off Request Endpoints:**
+- `POST /time-off-requests` - Create new time-off request
+- `GET /time-off-requests/:id` - Get specific request
+- `GET /time-off-requests?employeeId=&status=` - List requests with filters
+- `POST /time-off-requests/:id/approve` - Approve request (triggers HCM sync)
+- `POST /time-off-requests/:id/reject` - Reject request (releases pending units)
+- `POST /time-off-requests/:id/retry-sync` - Retry failed sync
+
+**Mock HCM Endpoints (for testing):**
+- `GET /mock-hcm/balances/:employeeId?locationId=&leaveType=` - Get HCM balance
+- `POST /mock-hcm/time-off/validate` - Validate time-off with HCM
+- `POST /mock-hcm/time-off/apply` - Apply time-off deduction in HCM
+- `POST /mock-hcm/balances/batch-export` - Export all HCM balances
+- `POST /mock-hcm/simulate-anniversary` - Simulate anniversary bonus
+
+**Reconciliation Endpoints:**
+- `POST /reconciliation/run` - Run reconciliation process
+- `GET /reconciliation/runs` - List reconciliation run history
 
 ---
 
