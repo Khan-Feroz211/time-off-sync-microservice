@@ -140,19 +140,21 @@ export class TimeOffRequestsService {
   }
 
   async approveRequest(id: string, managerId?: string): Promise<RequestResponseDto> {
-    const request = await this.requestRepo.findOne({ where: { id }, relations: ['employee', 'location'] });
+    const request = await this.requestRepo.findOne({ where: { id } });
     if (!request) {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Request not found' });
     }
 
-    if (!request.employee || !request.location) {
+    const employee = await this.employeeRepo.findOne({ where: { id: request.employeeId } });
+    const location = await this.locationRepo.findOne({ where: { id: request.locationId } });
+    if (!employee || !location) {
       throw new BadRequestException({ code: ErrorCode.INVALID_DIMENSION_COMBINATION, message: 'Request employee or location not found' });
     }
 
     this.assertTransition(request.status, RequestStatus.APPROVED);
 
-    const empId = request.employee.externalHcmEmployeeId;
-    const locId = request.location.externalHcmLocationId;
+    const empId = employee.externalHcmEmployeeId;
+    const locId = location.externalHcmLocationId;
 
     const hcmResult = await this.hcmIntegration.validateTimeOff(empId, locId, request.leaveType, Number(request.units));
     await this.persistSyncEvent(hcmResult.event, request.id);
@@ -188,12 +190,14 @@ export class TimeOffRequestsService {
   }
 
   async rejectRequest(id: string, managerId?: string): Promise<RequestResponseDto> {
-    const request = await this.requestRepo.findOne({ where: { id }, relations: ['employee', 'location'] });
+    const request = await this.requestRepo.findOne({ where: { id } });
     if (!request) {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Request not found' });
     }
 
-    if (!request.employee || !request.location) {
+    const employee = await this.employeeRepo.findOne({ where: { id: request.employeeId } });
+    const location = await this.locationRepo.findOne({ where: { id: request.locationId } });
+    if (!employee || !location) {
       throw new BadRequestException({ code: ErrorCode.INVALID_DIMENSION_COMBINATION, message: 'Request employee or location not found' });
     }
 
@@ -204,34 +208,40 @@ export class TimeOffRequestsService {
     await this.requestRepo.save(request);
 
     await this.balancesService.adjustPendingUnits(
-      request.employee.externalHcmEmployeeId,
-      request.location.externalHcmLocationId,
+      employee.externalHcmEmployeeId,
+      location.externalHcmLocationId,
       request.leaveType,
       -Number(request.units),
     );
 
     const saved = await this.requestRepo.save(request);
-    return this.mapToDto(saved, request.employee.externalHcmEmployeeId, request.location.externalHcmLocationId);
+    return this.mapToDto(saved, employee.externalHcmEmployeeId, location.externalHcmLocationId);
   }
 
   async retrySync(id: string): Promise<RequestResponseDto> {
-    const request = await this.requestRepo.findOne({ where: { id }, relations: ['employee', 'location'] });
+    const request = await this.requestRepo.findOne({ where: { id } });
     if (!request) {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Request not found' });
     }
 
     if (request.status !== RequestStatus.SYNC_FAILED && request.status !== RequestStatus.RETRYING) {
       throw new BadRequestException({
-        code: ErrorCode.INVALID_STATUS_TRANSITION,
-        message: `Cannot retry from status ${request.status}`,
+        code: ErrorCode.SYNC_CONFLICT,
+        message: 'Only SYNC_FAILED or RETRYING requests can be retried',
       });
+    }
+
+    const employee = await this.employeeRepo.findOne({ where: { id: request.employeeId } });
+    const location = await this.locationRepo.findOne({ where: { id: request.locationId } });
+    if (!employee || !location) {
+      throw new BadRequestException({ code: ErrorCode.INVALID_DIMENSION_COMBINATION, message: 'Request employee or location not found' });
     }
 
     request.status = RequestStatus.RETRYING;
     await this.requestRepo.save(request);
 
-    const empId = request.employee.externalHcmEmployeeId;
-    const locId = request.location.externalHcmLocationId;
+    const empId = employee.externalHcmEmployeeId;
+    const locId = location.externalHcmLocationId;
 
     const hcmResult = await this.hcmIntegration.validateTimeOff(empId, locId, request.leaveType, Number(request.units));
     await this.persistSyncEvent(hcmResult.event, request.id);

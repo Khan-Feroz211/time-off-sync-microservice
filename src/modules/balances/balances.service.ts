@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { LeaveBalance } from '../../entities/leave-balance.entity';
@@ -6,6 +6,7 @@ import { Employee } from '../../entities/employee.entity';
 import { Location } from '../../entities/location.entity';
 import { HcmIntegrationService } from '../hcm-integration/hcm-integration.service';
 import { ErrorCode } from '../../common/error-codes.enum';
+import { DatabaseUtils } from '../../common/database.utils';
 
 export interface BalanceDto {
   employeeId: string;
@@ -25,6 +26,8 @@ export interface SyncResult {
 
 @Injectable()
 export class BalancesService {
+  private readonly logger = new Logger(BalancesService.name);
+
   constructor(
     @InjectRepository(LeaveBalance)
     private readonly leaveBalanceRepo: Repository<LeaveBalance>,
@@ -84,7 +87,25 @@ export class BalancesService {
         pendingUnits: 0,
         lastHcmSnapshotAt: new Date(),
       });
-      await this.leaveBalanceRepo.save(balance);
+
+      try {
+        await this.leaveBalanceRepo.save(balance);
+      } catch (error) {
+        // PERMANENT FIX: Handle unique constraint violation (race condition)
+        if (DatabaseUtils.isUniqueConstraintViolation(error)) {
+          DatabaseUtils.logUniqueConstraintViolation(error, 'LeaveBalance.getOrCreateBalance');
+          // Retry to fetch the balance created by the competing request
+          balance = await this.leaveBalanceRepo.findOne({
+            where: { employeeId: employee.id, locationId: location.id, leaveType },
+          });
+          if (!balance) {
+            throw new Error('Failed to create or retrieve balance after unique constraint violation');
+          }
+          this.logger.debug(`Successfully recovered from race condition for ${employeeId}/${locationId}/${leaveType}`);
+        } else {
+          throw error;
+        }
+      }
     }
 
     return balance;
@@ -136,8 +157,30 @@ export class BalancesService {
           balance.lastHcmSnapshotAt = new Date();
         }
 
-        await this.leaveBalanceRepo.save(balance);
-        updated++;
+        try {
+          await this.leaveBalanceRepo.save(balance);
+          updated++;
+        } catch (saveError) {
+          // PERMANENT FIX: Handle unique constraint violation (race condition)
+          if (DatabaseUtils.isUniqueConstraintViolation(saveError)) {
+            DatabaseUtils.logUniqueConstraintViolation(saveError, `LeaveBalance.syncBatch[${hcm.employeeId}/${hcm.locationId}/${hcm.leaveType}]`);
+            // Retry fetch and update
+            const existingBalance = await this.leaveBalanceRepo.findOne({
+              where: { employeeId: employee.id, locationId: location.id, leaveType: hcm.leaveType },
+            });
+            if (existingBalance) {
+              existingBalance.availableUnits = hcm.availableUnits;
+              existingBalance.lastHcmSnapshotAt = new Date();
+              await this.leaveBalanceRepo.save(existingBalance);
+              updated++;
+              this.logger.debug(`Successfully recovered and updated balance for ${hcm.employeeId}/${hcm.locationId}/${hcm.leaveType}`);
+            } else {
+              errors.push(`Failed to handle race condition for ${hcm.employeeId}/${hcm.locationId}/${hcm.leaveType}`);
+            }
+          } else {
+            throw saveError;
+          }
+        }
       } catch (e) {
         errors.push(`Failed to update ${hcm.employeeId}/${hcm.locationId}/${hcm.leaveType}: ${e.message}`);
       }
